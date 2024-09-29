@@ -1,6 +1,6 @@
 module github.com/ZacxDev/generooni
 
-go 1.22.7
+go 1.22.6
 
 require (
 	github.com/bmatcuk/doublestar/v4 v4.6.1
