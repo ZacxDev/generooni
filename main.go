@@ -853,7 +853,7 @@ func (te *TargetExecutor) readAndUpdateLogs(name string, pipe io.Reader) {
 }
 
 func main() {
-	logOut := flag.Bool("log-out", false, "Log all job command output to stdout")
+	betaUI := flag.Bool("beta-ui", false, "Log all job command output to stdout")
 	flag.Parse()
 
 	executor := NewTargetExecutor()
@@ -867,7 +867,7 @@ func main() {
 		log.Fatalf("Error parsing Starlark config: %v", err)
 	}
 
-	if !*logOut {
+	if *betaUI {
 		defer func() {
 			// Restore the terminal
 			fmt.Print("\033[?1049l")
@@ -879,7 +879,7 @@ func main() {
 		executor.AddTarget(target)
 	}
 
-	if err := executor.ExecuteTargets(*logOut); err != nil {
+	if err := executor.ExecuteTargets(!*betaUI); err != nil {
 		log.Fatalf("Error executing targets: %v", err)
 	}
 }
