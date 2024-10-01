@@ -170,6 +170,10 @@ func (te *TargetExecutor) calculateLockfileKey(target *FilesystemTarget) (string
 		}
 	}
 
+	for _, pattern := range target.Outputs {
+		io.WriteString(h, pattern)
+	}
+
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
@@ -360,6 +364,9 @@ func (te *TargetExecutor) executeTarget(name string, statusMap map[string]*Execu
 		status.Skipped = true
 		status.EndTime = time.Now()
 		te.mu.Unlock()
+
+		fmt.Fprintf(os.Stdout, "[%s] completed [cached]\n", name)
+
 		return
 	}
 
@@ -408,6 +415,10 @@ func (te *TargetExecutor) executeTarget(name string, statusMap map[string]*Execu
 		if err := te.collectAndStoreFileChanges(target, lockfileKey); err != nil {
 			log.Printf("Error collecting file changes for target %s: %v", name, err)
 		}
+	}
+
+	if logOut {
+		fmt.Fprintf(os.Stdout, "[%s] completed\n", name)
 	}
 }
 
