@@ -166,9 +166,7 @@ func (te *TargetExecutor) calculateLockfileKey(target *FilesystemTarget) (string
 			return "", fmt.Errorf("error expanding glob pattern %s: %v", pattern, err)
 		}
 		for _, match := range matches {
-			if err := hashPathRecursively(h, match); err != nil {
-				return "", err
-			}
+			io.WriteString(h, match)
 		}
 	}
 
