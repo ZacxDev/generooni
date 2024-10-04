@@ -462,17 +462,18 @@ func (te *TargetExecutor) calculateLockfileKey(target *target.FilesystemTarget) 
 }
 
 func (te *TargetExecutor) handleExecutionFailure(name string, target *target.FilesystemTarget, status *ExecutionStatus) {
-	te.mu.Lock()
-	status.Status = "Failed"
-	status.EndTime = time.Now()
-	te.mu.Unlock()
-
 	if !target.AllowFailure {
 		te.failMu.Lock()
 		te.failedTargets = append(te.failedTargets, name)
+		status.Status = "Failed"
+		status.EndTime = time.Now()
 		te.failMu.Unlock()
 		fmt.Printf("[%s] failed\n", name)
 	} else {
+		te.failMu.Lock()
+		status.Status = "Completed"
+		status.EndTime = time.Now()
+		te.failMu.Unlock()
 		fmt.Printf("[%s] failed, but continuing due to allow_failure flag\n", name)
 	}
 }
