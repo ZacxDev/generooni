@@ -32,6 +32,7 @@ type TargetExecutor struct {
 	failMu        sync.Mutex
 	wg            sync.WaitGroup
 	LockFile      map[string]LockFileEntry
+	freshLockFile map[string]LockFileEntry
 	CacheDir      string
 }
 
@@ -51,11 +52,12 @@ type FileChangeInfo struct {
 
 func NewTargetExecutor() *TargetExecutor {
 	return &TargetExecutor{
-		Targets:   make(map[string]*target.FilesystemTarget),
-		DAG:       make(map[string][]string),
-		StatusMap: make(map[string]*ExecutionStatus),
-		LockFile:  make(map[string]LockFileEntry),
-		CacheDir:  ".generooni-cache",
+		Targets:       make(map[string]*target.FilesystemTarget),
+		DAG:           make(map[string][]string),
+		StatusMap:     make(map[string]*ExecutionStatus),
+		LockFile:      make(map[string]LockFileEntry),
+		freshLockFile: make(map[string]LockFileEntry),
+		CacheDir:      ".generooni-cache",
 	}
 }
 
@@ -93,7 +95,11 @@ func (te *TargetExecutor) ExecuteTargets() error {
 		return errors.Errorf("execution failed for %d target(s)", failedCount)
 	}
 
-	return te.saveLockFile()
+	if err := te.saveFreshLockFile(); err != nil {
+		return errors.Wrap(err, "failed to save fresh lockfile")
+	}
+
+	return nil
 }
 
 func (te *TargetExecutor) topologicalSort() ([]string, error) {
@@ -131,7 +137,7 @@ func (te *TargetExecutor) topologicalSort() ([]string, error) {
 	return order, nil
 }
 
-func (te *TargetExecutor) saveLockFile() error {
+func (te *TargetExecutor) saveFreshLockFile() error {
 	lockFile, err := os.Create("generooni.lock")
 	if err != nil {
 		return err
@@ -140,7 +146,7 @@ func (te *TargetExecutor) saveLockFile() error {
 
 	encoder := json.NewEncoder(lockFile)
 	encoder.SetIndent("", "  ")
-	return encoder.Encode(te.LockFile)
+	return encoder.Encode(te.freshLockFile)
 }
 
 func (te *TargetExecutor) LoadLockFile() error {
@@ -215,6 +221,10 @@ func (te *TargetExecutor) executeTarget(name string) {
 				status.EndTime = time.Now()
 				te.mu.Unlock()
 
+				te.fileChangesMu.Lock()
+				te.freshLockFile[lockfileKey] = te.LockFile[lockfileKey]
+				te.fileChangesMu.Unlock()
+
 				fmt.Printf("[%s] completed [cached]\n", name)
 				return
 			} else {
@@ -265,6 +275,10 @@ func (te *TargetExecutor) executeTarget(name string) {
 		if lockfileKey != "" {
 			if err := te.collectAndStoreFileChanges(target, lockfileKey); err != nil {
 				log.Printf("Error collecting file changes for target %s: %v", name, err)
+			} else {
+				te.fileChangesMu.Lock()
+				te.freshLockFile[lockfileKey] = te.LockFile[lockfileKey]
+				te.fileChangesMu.Unlock()
 			}
 		}
 
