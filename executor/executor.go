@@ -245,6 +245,7 @@ func (te *TargetExecutor) executeTarget(name string) {
 
 	if err := cmd.Wait(); err != nil {
 		log.Printf("Error executing target %s: %v", name, err)
+		te.handleExecutionFailure(name, target, status)
 		te.mu.Lock()
 		status.Status = "Failed"
 		status.EndTime = time.Now()
@@ -458,4 +459,20 @@ func (te *TargetExecutor) calculateLockfileKey(target *target.FilesystemTarget) 
 	}
 
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+func (te *TargetExecutor) handleExecutionFailure(name string, target *target.FilesystemTarget, status *ExecutionStatus) {
+	te.mu.Lock()
+	status.Status = "Failed"
+	status.EndTime = time.Now()
+	te.mu.Unlock()
+
+	if !target.AllowFailure {
+		te.failMu.Lock()
+		te.failedTargets = append(te.failedTargets, name)
+		te.failMu.Unlock()
+		fmt.Printf("[%s] failed\n", name)
+	} else {
+		fmt.Printf("[%s] failed, but continuing due to allow_failure flag\n", name)
+	}
 }

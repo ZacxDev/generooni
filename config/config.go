@@ -147,6 +147,12 @@ func parseTarget(name string, dict *starlark.Dict) (*target.FilesystemTarget, er
 		target.IsPartial = isPartial
 	}
 
+	if allowFailure, ok, err := getBooleanValue(dict, "allow_failure"); err != nil {
+		return nil, err
+	} else if ok {
+		target.AllowFailure = allowFailure
+	}
+
 	// Calculate input hash based on dependencies content
 	inputHash, err := calculateInputHash(target.Dependencies)
 	if err != nil {

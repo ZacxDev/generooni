@@ -10,4 +10,5 @@ type FilesystemTarget struct {
 	InputHash              string
 	OutputHash             string
 	IsPartial              bool // if the job mutates a file that the user might change manually after
+	AllowFailure           bool
 }
