@@ -1,80 +1,138 @@
 # Generooni
 
-## Problem
-Code generation tools are essential in modern development but often lead to slow build times, complex dependencies, and inconsistent results. Developers struggle with lengthy codegen processes, intricate execution orders, and the need for multiple runs to ensure all generated code is up-to-date.
+**Effortless Code Generation Orchestration**
 
-## Solution
-Generooni is a powerful codegen orchestration system that isolates, maps dependencies, and caches code generation processes. It creates a hermetic codegen pipeline, dramatically reducing generation times while ensuring code consistency and correctness.
+## Introduction
 
----
+Generooni is a powerful tool that streamlines your code generation processes. By intelligently managing dependencies, caching outputs, and isolating tasks, it ensures your codegen pipeline is fast, consistent, and hassle-free.
 
-## Overview
+## Why Use Generooni?
 
-Generooni is designed to solve the challenges introduced by heavy use of code generation tools. It offers a flexible and efficient approach to managing codegen processes, addressing issues such as:
+Modern development often relies on multiple code generation tools, leading to:
 
-- Slow codegen times as more jobs are added
-- Interdependencies requiring complex execution order or multiple runs
-- Inconsistent or outdated generated code
+- **Slow Build Times**: As more codegen tasks are added, builds become sluggish.
+- **Complex Dependencies**: Managing execution order can become a nightmare.
+- **Inconsistent Code**: Generated code may be outdated or conflicting.
+- **Multiple Runs Needed**: Ensuring all code is up-to-date often requires several passes.
 
-By isolating and mapping codegen jobs, Generooni enables a hermetic codegen pipeline that can be cached both locally and in CI systems. This brings codegen times to near-zero while still guaranteeing the code is in the correct state.
+**Generooni** solves these problems by:
 
-## Features
+- **Mapping Dependencies**: Automatically detects and manages task interdependencies.
+- **Caching Outputs**: Avoids regenerating code when inputs haven't changed.
+- **Isolating Tasks**: Runs each job separately to prevent conflicts.
+- **Parallel Execution**: Executes independent tasks concurrently for speed.
 
-- **Dependency Mapping**: Automatically detects and manages dependencies between codegen tasks.
-- **Caching**: Implements intelligent caching to avoid unnecessary regeneration of unchanged code.
-- **Isolation**: Runs each codegen job in isolation to prevent conflicts and ensure consistency.
-- **Flexible Configuration**: Uses a Starlark-based configuration system for powerful and customizable setups.
-- **CI Integration**: Easily integrates with CI/CD pipelines for efficient builds and deployments.
+## Key Features
+
+- **Simple Configuration**: Define your codegen tasks using an easy-to-write Starlark file.
+- **Intelligent Caching**: Speeds up builds by reusing unchanged outputs.
+- **Automatic Dependency Management**: Ensures tasks run in the correct order.
+- **CI/CD Friendly**: Seamlessly integrates into your existing pipelines by checking in .generooni-cache and generooni.lock files, or by externally caching/pulling them in
 
 ## Getting Started
 
 ### Installation
 
+Install Generooni using Go:
+
 ```bash
-go get github.com/your-org/generooni
+go get github.com/ZacxDev/generooni
 ```
 
 ### Basic Usage
 
-1. Create a `generooni.star` configuration file in your project root.
-2. Define your codegen jobs and their dependencies.
-3. Run Generooni:
+1. **Create a Configuration File**
 
-```bash
-generooni generate
-```
+   Add a `generooni.star` file to your project's root directory.
+
+2. **Define Codegen Tasks**
+
+   Specify your code generation commands, outputs, and dependencies.
+
+3. **Run Generooni**
+
+   Generate your code with:
+
+   ```bash
+   generooni map-dependencies # sync job dependency files based on dependency_sync_patterns
+   generooni generate
+   ```
 
 ### Example Configuration
 
 ```python
 # generooni.star
 
-def filesystem_target(cmd, outputs, dependencies=None, dependency_sync_patterns=None):
+load("generooni-deps.star", "filesystem_target_dependency_map")
+
+def get_dependencies(target_name):
+    return filesystem_target_dependency_map.get(target_name, [])
+
+def filesystem_target(cmd, outputs, dependencies=None, target_deps=None):
     return {
         "cmd": cmd,
         "outputs": outputs,
         "dependencies": dependencies or [],
-        "dependency_sync_patterns": dependency_sync_patterns or [],
+        "target_deps": target_deps or [],
     }
 
 config = {
     "protobuf": filesystem_target(
-        cmd = "protoc --go_out=. --go-grpc_out=. *.proto",
-        outputs = ["*.pb.go"],
-        dependencies = ["*.proto"],
+        cmd="protoc --go_out=. --go-grpc_out=. *.proto",
+        outputs=["*.pb.go"],
+        dependencies = get_dependencies("protobuf"),
+        dependency_sync_patterns=["*.proto"],
     ),
     "graphql": filesystem_target(
-        cmd = "gqlgen generate",
-        outputs = ["graph/generated.go", "graph/model/models_gen.go"],
-        dependencies = ["graph/*.graphqls", "gqlgen.yml"],
-        target_deps = ["protobuf"],
+        cmd="gqlgen generate",
+        outputs=["graph/generated.go", "graph/model/models_gen.go"],
+        dependencies = get_dependencies("graphql"),
+        dependency_sync_patterns=["graph/*.graphqls", "gqlgen.yml"],
+        target_deps=["protobuf"],
     ),
 }
 ```
 
-## Advanced Features
+In this example:
 
-- **Partial Jobs**: Support for jobs that modify existing files.
-- **Custom Caching**: Fine-grained control over what gets cached and how.
-- **Parallel Execution**: Automatically runs independent jobs in parallel for faster execution.
+- We import the dependency mappings generated by `generooni map-dependencies`, and setup a helper function to extract them
+- **`protobuf` Task**: Generates Go code from `.proto` files.
+- **`graphql` Task**: Generates GraphQL code and depends on the `protobuf` task.
+
+### Running the Generator
+
+Execute:
+
+```bash
+generooni map-dependencies # sync job dependency files based on dependency_sync_patterns
+generooni generate
+```
+
+Generooni will:
+
+- Analyze tasks and dependencies.
+- Execute tasks in the correct order.
+- Cache outputs to speed up future runs.
+
+## Advanced Usage
+
+### Partial Tasks
+
+Support tasks that modify existing files by specifying affected files.
+
+### Custom Caching
+
+Control caching behavior for specific tasks and outputs.
+
+### Parallel Execution
+
+Automatically runs independent tasks in parallel to reduce build times.
+
+## CI/CD Integration
+
+Include Generooni in your continuous integration pipeline to ensure consistent code generation across all environments. Benefit from cached outputs to accelerate build times.
+
+## Contributing
+
+We welcome contributions!
 
