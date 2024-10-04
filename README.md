@@ -4,16 +4,16 @@
 
 ## Introduction
 
-Generooni is a powerful tool that streamlines your code generation processes. By intelligently managing dependencies, caching outputs, and isolating tasks, it ensures your codegen pipeline is fast, consistent, and hassle-free.
+Generooni is a powerful tool that streamlines your code generation processes. By intelligently managing dependencies, caching outputs, and isolating tasks, it ensures your codegen pipeline is fast, consistent, and correct.
 
 ## Why Use Generooni?
 
 Modern development often relies on multiple code generation tools, leading to:
 
 - **Slow Build Times**: As more codegen tasks are added, builds become sluggish.
-- **Complex Dependencies**: Managing execution order can become a nightmare.
-- **Inconsistent Code**: Generated code may be outdated or conflicting.
-- **Multiple Runs Needed**: Ensuring all code is up-to-date often requires several passes.
+- **Complex Dependencies**: Managing execution order of interdependent tasks can become a nightmare.
+- **Inconsistent Code**: Generated code may be outdated or conflicting, especially if checked in.
+- **Multiple Runs Needed**: Ensuring all code is up-to-date often requires several passes, increasing build times.
 
 **Generooni** solves these problems by:
 
@@ -21,6 +21,7 @@ Modern development often relies on multiple code generation tools, leading to:
 - **Caching Outputs**: Avoids regenerating code when inputs haven't changed.
 - **Isolating Tasks**: Runs each job separately to prevent conflicts.
 - **Parallel Execution**: Executes independent tasks concurrently for speed.
+- **State Verification**: Uses a lockfile to ensure generated code files are in the correct state; restoring or regenerating them if needed.
 
 ## Key Features
 
@@ -30,6 +31,8 @@ Modern development often relies on multiple code generation tools, leading to:
 - **CI/CD Friendly**: Seamlessly integrates into your existing pipelines by checking in .generooni-cache and generooni.lock files, or by externally caching/pulling them in
 
 ## Getting Started
+
+> ⚠️ **Warning**: Generooni is not ready for production use. It's a work in progress and may contain bugs or incomplete features.  If you are keen to try it out, it is recommended that you use generooni locally, while still running codegen tasks directly in CI.
 
 ### Installation
 
@@ -78,17 +81,17 @@ def filesystem_target(cmd, outputs, dependencies=None, target_deps=None):
 
 config = {
     "protobuf": filesystem_target(
-        cmd="protoc --go_out=. --go-grpc_out=. *.proto",
-        outputs=["*.pb.go"],
-        dependencies = get_dependencies("protobuf"),
-        dependency_sync_patterns=["*.proto"],
+        cmd="protoc --go_out=. --go-grpc_out=. *.proto", # The command to run
+        outputs=["*.pb.go"], # What files do we expect to be generated. used for caching, make sure this doesn't match any files you might change, because they will be overwritten
+        dependencies = get_dependencies("protobuf"), # pull in generated dependency map
+        dependency_sync_patterns=["*.proto"], # used with map-dependencies subcommand to generate job-inputs dependency map as used above
     ),
     "graphql": filesystem_target(
         cmd="gqlgen generate",
         outputs=["graph/generated.go", "graph/model/models_gen.go"],
         dependencies = get_dependencies("graphql"),
         dependency_sync_patterns=["graph/*.graphqls", "gqlgen.yml"],
-        target_deps=["protobuf"],
+        target_deps=["protobuf"], # other targets this target depends on
     ),
 }
 ```
