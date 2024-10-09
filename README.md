@@ -1,3 +1,4 @@
+[![Go Report Card](https://goreportcard.com/badge/github.com/ZacxDev/generooni)](https://goreportcard.com/report/github.com/ZacxDev/generooni)
 # Generooni
 
 **Effortless Code Generation Orchestration**
