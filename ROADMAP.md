@@ -1,5 +1,7 @@
 ## Roadmap
 
+- Include generooni version in lockfile
+- version command
 - Automatically delete stale cache entries
 - clean command to nuke the cache
 - --target flag to only regen that target and targets that depend on it
