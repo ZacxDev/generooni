@@ -1,493 +1,218 @@
 package executor
 
 import (
-	"bufio"
 	"crypto/md5"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/ZacxDev/generooni/fs"
 	"github.com/ZacxDev/generooni/target"
-	"github.com/bmatcuk/doublestar/v4"
 	"github.com/pkg/errors"
 )
 
 type TargetExecutor struct {
-	Targets       map[string]*target.FilesystemTarget
-	DAG           map[string][]string
-	mu            sync.Mutex
-	FileChanges   map[string]FileChangeInfo
-	fileChangesMu sync.Mutex
-	StatusMap     map[string]*ExecutionStatus
-	failedTargets []string
-	failMu        sync.Mutex
-	wg            sync.WaitGroup
-	LockFile      map[string]LockFileEntry
-	freshLockFile map[string]LockFileEntry
-	CacheDir      string
+	targets     map[string]*target.FilesystemTarget
+	dag         DAGManager
+	statusMgr   StatusManager
+	lockMgr     LockFileManager
+	cacheMgr    CacheManager
+	cmdExecutor CommandExecutor
+	fs          fs.FileSystem
 }
 
-type ExecutionStatus struct {
-	Status    string
-	StartTime time.Time
-	EndTime   time.Time
-}
-
-type LockFileEntry struct {
-	CachedFiles map[string]string
-}
-
-type FileChangeInfo struct {
-	Content []byte
-}
-
-func NewTargetExecutor() *TargetExecutor {
+func NewTargetExecutor(
+	fs fs.FileSystem,
+	cmdExecutor CommandExecutor,
+	cacheMgr CacheManager,
+	lockMgr LockFileManager,
+) *TargetExecutor {
 	return &TargetExecutor{
-		Targets:       make(map[string]*target.FilesystemTarget),
-		DAG:           make(map[string][]string),
-		StatusMap:     make(map[string]*ExecutionStatus),
-		LockFile:      make(map[string]LockFileEntry),
-		freshLockFile: make(map[string]LockFileEntry),
-		CacheDir:      ".generooni-cache",
+		targets:     make(map[string]*target.FilesystemTarget),
+		dag:         NewDAGManager(),
+		statusMgr:   NewStatusManager(),
+		lockMgr:     lockMgr,
+		cacheMgr:    cacheMgr,
+		cmdExecutor: cmdExecutor,
+		fs:          fs,
 	}
+}
+
+func (te *TargetExecutor) Initialize() error {
+	if err := te.cacheMgr.EnsureCacheDir(); err != nil {
+		return errors.Wrap(err, "failed to create cache directory")
+	}
+
+	if err := te.lockMgr.LoadLockFile(); err != nil {
+		return errors.Wrap(err, "failed to load lock file")
+	}
+
+	return nil
 }
 
 func (te *TargetExecutor) AddTarget(target *target.FilesystemTarget) {
-	te.mu.Lock()
-	defer te.mu.Unlock()
-	te.Targets[target.Name] = target
-	te.DAG[target.Name] = target.TargetDeps
-	te.StatusMap[target.Name] = &ExecutionStatus{
-		Status: "Queued",
-	}
+	te.targets[target.Name] = target
+	te.dag.AddNode(target.Name, target.TargetDeps)
+	te.statusMgr.SetStatus(target.Name, "Queued")
 }
 
 func (te *TargetExecutor) ExecuteTargets() error {
-	order, err := te.topologicalSort()
+	order, err := te.dag.TopologicalSort()
 	if err != nil {
 		return errors.Wrap(err, "failed to perform topological sort")
 	}
 
+	var wg sync.WaitGroup
 	for _, name := range order {
-		te.wg.Add(1)
+		wg.Add(1)
 		go func(name string) {
-			defer te.wg.Done()
+			defer wg.Done()
 			te.executeTarget(name)
 		}(name)
 	}
 
-	te.wg.Wait()
+	wg.Wait()
 
-	te.failMu.Lock()
-	failedCount := len(te.failedTargets)
-	te.failMu.Unlock()
-
-	if failedCount > 0 {
-		return errors.Errorf("execution failed for %d target(s)", failedCount)
+	if te.statusMgr.FailedCount() > 0 {
+		return errors.Errorf("execution failed for %d target(s)", te.statusMgr.FailedCount())
 	}
 
-	if err := te.saveFreshLockFile(); err != nil {
-		return errors.Wrap(err, "failed to save fresh lockfile")
-	}
-
-	return nil
-}
-
-func (te *TargetExecutor) topologicalSort() ([]string, error) {
-	visited := make(map[string]bool)
-	var order []string
-
-	var visit func(string) error
-	visit = func(name string) error {
-		if visited[name] {
-			return nil
-		}
-		visited[name] = true
-
-		for _, dep := range te.DAG[name] {
-			if err := visit(dep); err != nil {
-				return err
-			}
-		}
-
-		order = append(order, name)
-		return nil
-	}
-
-	for name := range te.Targets {
-		if err := visit(name); err != nil {
-			return nil, err
-		}
-	}
-
-	for i := 0; i < len(order)/2; i++ {
-		j := len(order) - 1 - i
-		order[i], order[j] = order[j], order[i]
-	}
-
-	return order, nil
-}
-
-func (te *TargetExecutor) saveFreshLockFile() error {
-	lockFile, err := os.Create("generooni.lock")
-	if err != nil {
-		return err
-	}
-	defer lockFile.Close()
-
-	encoder := json.NewEncoder(lockFile)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(te.freshLockFile)
-}
-
-func (te *TargetExecutor) LoadLockFile() error {
-	lockFile, err := os.Open("generooni.lock")
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // It's okay if the lock file doesn't exist yet
-		}
-		return err
-	}
-	defer lockFile.Close()
-
-	decoder := json.NewDecoder(lockFile)
-	return decoder.Decode(&te.LockFile)
+	return te.lockMgr.SaveFreshLockFile()
 }
 
 func (te *TargetExecutor) executeTarget(name string) {
-	target := te.Targets[name]
-	te.mu.Lock()
-	status := te.StatusMap[name]
-	te.mu.Unlock()
+	target := te.targets[name]
 
-	// Wait for dependencies
-	for _, dep := range target.TargetDeps {
-		te.mu.Lock()
-		depStatus := te.StatusMap[dep]
-		te.mu.Unlock()
-		for depStatus.Status != "Completed" && depStatus.Status != "Failed" {
-			time.Sleep(100 * time.Millisecond)
-			te.mu.Lock()
-			depStatus = te.StatusMap[dep]
-			te.mu.Unlock()
-		}
-		if depStatus.Status == "Failed" {
-			te.mu.Lock()
-			status.Status = "Skipped"
-			status.EndTime = time.Now()
-			te.mu.Unlock()
-			fmt.Printf("[%s] skipped due to dependency failure\n", name)
-			return
-		}
-	}
-
-	te.mu.Lock()
-	status.Status = "Running"
-	status.StartTime = time.Now()
-	te.mu.Unlock()
-
-	var lockfileKey string
-	if !target.IsPartial {
-		lockfileKeyVal, err := te.calculateLockfileKey(target)
-		if err != nil {
-			log.Printf("Error calculating lockfile key for target %s: %v", name, err)
-			te.mu.Lock()
-			status.Status = "Failed"
-			status.EndTime = time.Now()
-			te.mu.Unlock()
-			return
-		}
-
-		lockfileKey = lockfileKeyVal
-
-		te.fileChangesMu.Lock()
-		_, hasCachedChanges := te.LockFile[lockfileKey]
-		te.fileChangesMu.Unlock()
-
-		if hasCachedChanges {
-			err := te.applyCachedFileChanges(lockfileKey)
-			if err == nil {
-				te.mu.Lock()
-				status.Status = "Completed"
-				status.EndTime = time.Now()
-				te.mu.Unlock()
-
-				te.fileChangesMu.Lock()
-				te.freshLockFile[lockfileKey] = te.LockFile[lockfileKey]
-				te.fileChangesMu.Unlock()
-
-				fmt.Printf("[%s] completed [cached]\n", name)
-				return
-			} else {
-				log.Printf("Error applying cached file changes for target %s. continuing with job executtion.\n %v.", name, err)
-			}
-		}
-	}
-
-	// Execute the actual command
-	cmd := exec.Command("sh", "-c", target.Cmd)
-
-	// Create pipes for stdout and stderr
-	stdout, _ := cmd.StdoutPipe()
-	stderr, _ := cmd.StderrPipe()
-
-	if err := cmd.Start(); err != nil {
-		log.Printf("Error starting command for target %s: %v", name, err)
-		te.mu.Lock()
-		status.Status = "Failed"
-		status.EndTime = time.Now()
-		te.mu.Unlock()
+	if !te.waitForDependencies(name, target) {
 		return
 	}
 
-	// Start goroutines to read from stdout and stderr
-	go te.readAndLogOutput(name, stdout, os.Stdout)
-	go te.readAndLogOutput(name, stderr, os.Stderr)
+	te.statusMgr.UpdateStatus(name, "Running", time.Now(), time.Time{})
 
-	if err := cmd.Wait(); err != nil {
+	lockfileKey := te.getLockfileKey(target)
+	if !target.IsPartial && te.tryApplyCachedChanges(name, lockfileKey) {
+		return
+	}
+
+	if err := te.runCommand(name, target.Cmd); err != nil {
+		te.handleExecutionFailure(name, target)
+		return
+	}
+
+	te.statusMgr.UpdateStatus(name, "Completed", time.Time{}, time.Now())
+
+	if lockfileKey != "" {
+		te.handleCacheUpdate(name, target, lockfileKey)
+	}
+
+	fmt.Printf("[%s] completed\n", name)
+}
+
+func (te *TargetExecutor) waitForDependencies(name string, target *target.FilesystemTarget) bool {
+	for _, dep := range target.TargetDeps {
+		status := te.statusMgr.WaitForCompletion(dep)
+		if status == "Failed" {
+			te.statusMgr.UpdateStatus(name, "Skipped", time.Time{}, time.Now())
+			fmt.Printf("[%s] skipped due to dependency failure\n", name)
+			return false
+		}
+	}
+	return true
+}
+
+func (te *TargetExecutor) getLockfileKey(target *target.FilesystemTarget) string {
+	if target.IsPartial {
+		return ""
+	}
+
+	h := md5.New()
+	io.WriteString(h, target.Cmd)
+	io.WriteString(h, target.InputHash)
+	for _, pattern := range target.Outputs {
+		io.WriteString(h, pattern)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func (te *TargetExecutor) tryApplyCachedChanges(name, lockfileKey string) bool {
+	if lockfileKey == "" {
+		return false
+	}
+
+	entry, hasCachedChanges := te.lockMgr.GetCachedEntry(lockfileKey)
+	if !hasCachedChanges {
+		return false
+	}
+
+	err := te.cacheMgr.ApplyCachedFileChanges(entry)
+	if err != nil {
+		log.Printf("Error applying cached file changes for target %s. Continuing with job execution: %v", name, err)
+		return false
+	}
+
+	te.statusMgr.UpdateStatus(name, "Completed", time.Time{}, time.Now())
+	te.lockMgr.AddFreshEntry(lockfileKey, entry)
+	fmt.Printf("[%s] completed [cached]\n", name)
+	return true
+}
+
+func (te *TargetExecutor) runCommand(name, cmd string) error {
+	output, err := te.cmdExecutor.Execute("sh", "-c", cmd)
+	if err != nil {
 		log.Printf("Error executing target %s: %v", name, err)
-		te.handleExecutionFailure(name, target, status)
-		te.mu.Lock()
-		status.Status = "Failed"
-		status.EndTime = time.Now()
-		te.mu.Unlock()
+		return err
+	}
+	fmt.Printf("[%s] %s", name, string(output))
+	return nil
+}
 
-		te.failMu.Lock()
-		te.failedTargets = append(te.failedTargets, name)
-		te.failMu.Unlock()
-
+func (te *TargetExecutor) handleExecutionFailure(name string, target *target.FilesystemTarget) {
+	if !target.AllowFailure {
+		te.statusMgr.MarkAsFailed(name)
 		fmt.Printf("[%s] failed\n", name)
 	} else {
-		te.mu.Lock()
-		status.Status = "Completed"
-		status.EndTime = time.Now()
-		te.mu.Unlock()
-
-		if lockfileKey != "" {
-			if err := te.collectAndStoreFileChanges(target, lockfileKey); err != nil {
-				log.Printf("Error collecting file changes for target %s: %v", name, err)
-			} else {
-				te.fileChangesMu.Lock()
-				te.freshLockFile[lockfileKey] = te.LockFile[lockfileKey]
-				te.fileChangesMu.Unlock()
-			}
-		}
-
-		fmt.Printf("[%s] completed\n", name)
+		te.statusMgr.UpdateStatus(name, "Completed", time.Time{}, time.Now())
+		fmt.Printf("[%s] failed, but continuing due to allow_failure flag\n", name)
 	}
 }
 
-func (te *TargetExecutor) applyCachedFileChanges(lockfileKey string) error {
-	te.fileChangesMu.Lock()
-	entry, ok := te.LockFile[lockfileKey]
-	te.fileChangesMu.Unlock()
-
-	if !ok {
-		return fmt.Errorf("no cached entry found for key %s", lockfileKey)
-	}
-
-	missingFiles := te.verifyCacheIntegrity(entry)
-	if len(missingFiles) > 0 {
-		fmt.Printf("Warning: Some cached files are missing. Rebuilding target.\n")
-		for _, file := range missingFiles {
-			fmt.Printf("  Missing: %s\n", file)
-		}
-		return fmt.Errorf("cache integrity check failed")
-	}
-
-	for originalPath, cachedPath := range entry.CachedFiles {
-		if err := te.restoreFile(cachedPath, originalPath); err != nil {
-			return fmt.Errorf("error restoring file %s: %v", originalPath, err)
-		}
-	}
-
-	return nil
-}
-
-func (te *TargetExecutor) readAndLogOutput(name string, pipe io.Reader, output io.Writer) {
-	scanner := bufio.NewScanner(pipe)
-	for scanner.Scan() {
-		fmt.Fprintf(output, "[%s] %s\n", name, scanner.Text())
-	}
-}
-
-func (te *TargetExecutor) restoreFile(cachedPath, originalPath string) error {
-	content, err := os.ReadFile(cachedPath)
+func (te *TargetExecutor) handleCacheUpdate(name string, target *target.FilesystemTarget, lockfileKey string) {
+	entry, err := te.cacheMgr.CollectAndStoreFileChanges(target)
 	if err != nil {
-		return fmt.Errorf("error reading cached file %s: %v", cachedPath, err)
+		log.Printf("Error collecting file changes for target %s: %v", name, err)
+		return
 	}
 
-	originalInfo, err := os.Stat(originalPath)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("error stating original file %s: %v", originalPath, err)
+	if entry != nil {
+		te.lockMgr.AddFreshEntry(lockfileKey, *entry)
 	}
-
-	var originalMode os.FileMode = 0644
-	var originalPermissions os.FileMode
-	fileExists := err == nil
-
-	if fileExists {
-		originalMode = originalInfo.Mode()
-		originalPermissions = originalMode.Perm()
-	}
-
-	if err := os.MkdirAll(filepath.Dir(originalPath), 0755); err != nil {
-		return fmt.Errorf("error creating directory for %s: %v", originalPath, err)
-	}
-
-	// Check if the file is writable
-	if fileExists && originalPermissions&0200 == 0 {
-		// File is not writable, so make it writable
-		if err := os.Chmod(originalPath, originalPermissions|0200); err != nil {
-			return fmt.Errorf("error making file writable %s: %v", originalPath, err)
-		}
-		// Ensure we restore the original permissions after writing
-		defer func() {
-			if err := os.Chmod(originalPath, originalPermissions); err != nil {
-				fmt.Printf("Warning: error restoring original permissions for %s: %v\n", originalPath, err)
-			}
-		}()
-	}
-
-	if err := os.WriteFile(originalPath, content, originalMode); err != nil {
-		return fmt.Errorf("error writing restored file %s: %v", originalPath, err)
-	}
-
-	return nil
-}
-
-func (te *TargetExecutor) collectAndStoreFileChanges(target *target.FilesystemTarget, lockfileKey string) error {
-	entry := LockFileEntry{
-		CachedFiles: make(map[string]string),
-	}
-
-	for _, pattern := range target.Outputs {
-		matches, err := doublestar.FilepathGlob(pattern)
-		if err != nil {
-			return fmt.Errorf("error expanding glob pattern %s: %v", pattern, err)
-		}
-		for _, match := range matches {
-			err := filepath.WalkDir(match, func(path string, d fs.DirEntry, err error) error {
-				if err != nil {
-					return err
-				}
-				if !d.IsDir() {
-					cachedPath, err := te.cacheFile(path)
-					if err != nil {
-						return fmt.Errorf("error caching file %s: %v", path, err)
-					}
-					entry.CachedFiles[path] = cachedPath
-				}
-				return nil
-			})
-			if err != nil {
-				return fmt.Errorf("error walking directory %s: %v", match, err)
-			}
-		}
-	}
-
-	te.fileChangesMu.Lock()
-	defer te.fileChangesMu.Unlock()
-	te.LockFile[lockfileKey] = entry
-
-	return nil
-}
-
-func (te *TargetExecutor) verifyCacheIntegrity(entry LockFileEntry) []string {
-	var missingFiles []string
-	for _, cachedPath := range entry.CachedFiles {
-		if _, err := os.Stat(cachedPath); os.IsNotExist(err) {
-			missingFiles = append(missingFiles, cachedPath)
-		}
-	}
-	return missingFiles
-}
-
-func (te *TargetExecutor) cacheFile(originalPath string) (string, error) {
-	content, err := os.ReadFile(originalPath)
-	if err != nil {
-		return "", fmt.Errorf("error reading file %s: %v", originalPath, err)
-	}
-
-	hash := sha256.Sum256(content)
-	hashString := hex.EncodeToString(hash[:])
-
-	cachedPath := filepath.Join(te.CacheDir, hashString)
-	if err := os.MkdirAll(filepath.Dir(cachedPath), 0755); err != nil {
-		return "", fmt.Errorf("error creating cache directory: %v", err)
-	}
-
-	if err := os.WriteFile(cachedPath, content, 0644); err != nil {
-		return "", fmt.Errorf("error writing cached file: %v", err)
-	}
-
-	return cachedPath, nil
 }
 
 func (te *TargetExecutor) MapDependencies() error {
 	dependencyMap := make(map[string][]string)
 
-	for name, target := range te.Targets {
+	for name, target := range te.targets {
 		var deps []string
 		for _, pattern := range target.Dependencies {
-			matches, err := doublestar.FilepathGlob(pattern)
+			matches, err := te.fs.DoublestarGlob(pattern)
 			if err != nil {
 				return errors.Wrapf(err, "error expanding glob pattern %s for target %s", pattern, name)
 			}
 			deps = append(deps, matches...)
 		}
+
 		dependencyMap[name] = deps
 	}
 
 	content := fmt.Sprintf("filesystem_target_dependency_map = %#v", dependencyMap)
 
-	err := os.WriteFile("generooni-deps.star", []byte(content), 0644)
+	err := te.fs.WriteFile("generooni-deps.star", []byte(content), 0644)
 	if err != nil {
 		return errors.Wrap(err, "failed to write generooni-deps.star file")
 	}
 
 	fmt.Println("Generated generooni-deps.star file successfully.")
 	return nil
-}
-
-func (te *TargetExecutor) calculateLockfileKey(target *target.FilesystemTarget) (string, error) {
-	h := md5.New()
-
-	// Hash the job's command
-	io.WriteString(h, target.Cmd)
-
-	// Hash the job's input hash (which is based on the content of dependencies)
-	io.WriteString(h, target.InputHash)
-
-	for _, pattern := range target.Outputs {
-		io.WriteString(h, pattern)
-	}
-
-	return fmt.Sprintf("%x", h.Sum(nil)), nil
-}
-
-func (te *TargetExecutor) handleExecutionFailure(name string, target *target.FilesystemTarget, status *ExecutionStatus) {
-	if !target.AllowFailure {
-		te.failMu.Lock()
-		te.failedTargets = append(te.failedTargets, name)
-		status.Status = "Failed"
-		status.EndTime = time.Now()
-		te.failMu.Unlock()
-		fmt.Printf("[%s] failed\n", name)
-	} else {
-		te.failMu.Lock()
-		status.Status = "Completed"
-		status.EndTime = time.Now()
-		te.failMu.Unlock()
-		fmt.Printf("[%s] failed, but continuing due to allow_failure flag\n", name)
-	}
 }

@@ -1,14 +1,13 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 
 	"github.com/ZacxDev/generooni/config"
 	"github.com/ZacxDev/generooni/executor"
-	"github.com/bmatcuk/doublestar/v4"
+	"github.com/ZacxDev/generooni/fs"
 	"github.com/fatih/color"
 	"github.com/pkg/errors"
 	"github.com/urfave/cli/v2"
@@ -46,69 +45,35 @@ func generateAction(c *cli.Context) error {
 }
 
 func mapDependenciesAction(c *cli.Context) error {
+	fileSystem := &fs.RealFileSystem{}
+	cmdExecutor := &executor.RealCommandExecutor{}
+	cacheManager := executor.NewCacheManager(fileSystem, ".generooni-cache")
+	lockManager := executor.NewLockFileManager(fileSystem)
+
+	targetExecutor := executor.NewTargetExecutor(fileSystem, cmdExecutor, cacheManager, lockManager)
+
 	targets, err := config.ParseStarlarkConfig("generooni.star")
 	if err != nil {
 		return errors.Wrap(err, "failed to parse Starlark config")
 	}
 
-	dependencyMap := make(map[string][]string)
-
-	for name, target := range targets {
-		dependencyMap[name] = target.Dependencies
-
-		for _, pattern := range target.DependencySyncPatterns {
-			matches, err := doublestar.FilepathGlob(pattern)
-			if err != nil {
-				return errors.Wrapf(err, "error expanding glob pattern %s", pattern)
-			}
-
-		matchLoop:
-			for _, match := range matches {
-				fileInfo, err := os.Stat(match)
-				if err != nil {
-					return errors.Wrapf(err, "error getting file info for %s", match)
-				}
-				if !fileInfo.IsDir() {
-					for _, dep := range dependencyMap[name] {
-						if dep == match {
-							continue matchLoop
-						}
-					}
-
-					dependencyMap[name] = append(dependencyMap[name], match)
-				}
-			}
-		}
+	for _, target := range targets {
+		targetExecutor.AddTarget(target)
 	}
 
-	// Expand glob patterns in DependencySyncPatterns and update Dependencies
-	starlarkCode := generateStarlarkCode(dependencyMap)
-
-	if err := os.WriteFile("generooni-deps.star", []byte(starlarkCode), 0644); err != nil {
-		return errors.Wrap(err, "failed to write generooni-deps.star file")
-	}
-
-	fmt.Println("Successfully generated generooni-deps.star file")
-	return nil
-}
-
-func generateStarlarkCode(dependencyMap map[string][]string) string {
-	jsonBytes, _ := json.MarshalIndent(dependencyMap, "", "  ")
-	return fmt.Sprintf(`# This file is auto-generated. Do not edit manually.
-
-filesystem_target_dependency_map = %s
-`, string(jsonBytes))
+	return targetExecutor.MapDependencies()
 }
 
 func run() error {
-	executor := executor.NewTargetExecutor()
+	fileSystem := &fs.RealFileSystem{}
+	cmdExecutor := &executor.RealCommandExecutor{}
+	cacheManager := executor.NewCacheManager(fileSystem, ".generooni-cache")
+	lockManager := executor.NewLockFileManager(fileSystem)
 
-	if err := os.MkdirAll(executor.CacheDir, 0755); err != nil {
-		return errors.Wrap(err, "failed to create cache directory")
-	}
+	targetExecutor := executor.NewTargetExecutor(fileSystem, cmdExecutor, cacheManager, lockManager)
 
-	if err := executor.LoadLockFile(); err != nil {
-		return errors.Wrap(err, "failed to load lock file")
+	if err := targetExecutor.Initialize(); err != nil {
+		return errors.Wrap(err, "failed to initialize target executor")
 	}
 
 	targets, err := config.ParseStarlarkConfig("generooni.star")
@@ -117,10 +82,10 @@ func run() error {
 	}
 
 	for _, target := range targets {
-		executor.AddTarget(target)
+		targetExecutor.AddTarget(target)
 	}
 
-	if err := executor.ExecuteTargets(); err != nil {
+	if err := targetExecutor.ExecuteTargets(); err != nil {
 		return errors.Wrap(err, "failed to execute targets")
 	}
 
